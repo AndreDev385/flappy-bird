@@ -8,6 +8,7 @@ import rl "vendor:raylib"
 GameState :: enum {
 	Init,
 	Playing,
+	GameOver,
 }
 
 Obstacle :: struct {
@@ -42,7 +43,7 @@ WINDOW_HEIGHT :: 512 * SPRITE_SCALE
 FLOOR_HEIGHT :: WINDOW_HEIGHT - 112 * SPRITE_SCALE
 
 PLAYER_WIDTH :: 18 * SPRITE_SCALE
-PLAYER_HEIGHT :: 12 * SPRITE_SCALE
+PLAYER_HEIGHT :: 18 * SPRITE_SCALE
 STARTING_PLAYER_Y := f32(WINDOW_HEIGHT / 2 - PLAYER_HEIGHT / 2)
 
 FLAP_VELOCITY :: 14
@@ -80,6 +81,14 @@ restart :: proc(world: ^World) {
 	clear(&world.obstacles)
 }
 
+draw_score :: proc(world: ^World) {
+    first_number := world.sprites[fmt.tprint(world.score % 10)]
+    second_number := world.sprites[fmt.tprint(math.floor_div(world.score, 10))]
+
+	rl.DrawTexture(second_number, WINDOW_WIDTH / 2 - first_number.width, 40, rl.WHITE)
+	rl.DrawTexture(first_number, WINDOW_WIDTH / 2, 40, rl.WHITE)
+}
+
 main :: proc() {
 	rl.InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Flappy bird")
 
@@ -107,6 +116,7 @@ main :: proc() {
 	sprites["base"] = rl.LoadTexture("sprites/base.png")
 	sprites["bird"] = rl.LoadTexture("sprites/redbird-midflap.png")
 	sprites["obstacle"] = rl.LoadTexture("sprites/pipe-green.png")
+	sprites["gameover"] = rl.LoadTexture("sprites/gameover.png")
 
 	obstacles := make([dynamic]Obstacle, 0)
 	world := World {
@@ -125,7 +135,7 @@ main :: proc() {
 	rl.SetTargetFPS(60)
 	for !rl.WindowShouldClose() {
 
-        world.scroll_x += OBSTACLE_SPEED
+		world.scroll_x += OBSTACLE_SPEED
 
 		// UPDATE
 		switch world.game_state {
@@ -137,11 +147,11 @@ main :: proc() {
 		case .Playing:
 			if rl.IsKeyPressed(rl.KeyboardKey.SPACE) {
 				world.player_vy = -FLAP_VELOCITY
-                rl.PlaySound(world.sounds["wing"])
+				rl.PlaySound(world.sounds["wing"])
 			}
 
 			world.player_vy += GRAVITY
-			world.player_y += world.player_vy
+			if world.player_y < FLOOR_HEIGHT do world.player_y += world.player_vy
 
 			// Spawn obstacles timer
 			world.current_obstacle_timer -= rl.GetFrameTime()
@@ -151,19 +161,20 @@ main :: proc() {
 			}
 
 			// Move obstacles & point score
-            for &obstacle in world.obstacles {
-                obstacle.upper.x -= OBSTACLE_SPEED
-                obstacle.lower.x -= OBSTACLE_SPEED
+			for &obstacle in world.obstacles {
+				obstacle.upper.x -= OBSTACLE_SPEED
+				obstacle.lower.x -= OBSTACLE_SPEED
 
-				if world.player_x > obstacle.upper.x + obstacle.upper.width / 2 && !obstacle.scored {
-                    world.score += 1
-                    obstacle.scored = true
-                    rl.PlaySound(world.sounds["point"])
-                }
+				if world.player_x > obstacle.upper.x + obstacle.upper.width / 2 &&
+				   !obstacle.scored {
+					world.score += 1
+					obstacle.scored = true
+					rl.PlaySound(world.sounds["point"])
+				}
 			}
 
 			for obstacle, index in world.obstacles {
-                if obstacle.upper.x + obstacle.upper.width < 0 do unordered_remove(&world.obstacles, index)
+				if obstacle.upper.x + obstacle.upper.width < 0 do unordered_remove(&world.obstacles, index)
 			}
 
 			// Reset when hitting the ground or obstacle
@@ -178,14 +189,20 @@ main :: proc() {
 				)
 
 				if upper_collision || lower_collision {
-                    rl.PlaySound(world.sounds["hit"])
-                    restart(&world)
-                }
+					rl.PlaySound(world.sounds["hit"])
+					world.game_state = .GameOver
+				}
 			}
 			if world.player_y + f32(PLAYER_HEIGHT) / 2 >= FLOOR_HEIGHT {
-                rl.PlaySound(world.sounds["hit"])
-              restart(&world)
-            }
+				rl.PlaySound(world.sounds["hit"])
+				world.game_state = .GameOver
+			}
+		case .GameOver:
+			world.player_vy += GRAVITY
+			if world.player_y < FLOOR_HEIGHT do world.player_y += world.player_vy
+			if rl.IsKeyPressed(rl.KeyboardKey.SPACE) {
+				restart(&world)
+			}
 		}
 
 		// ======== Draw section
@@ -195,55 +212,40 @@ main :: proc() {
 
 		rl.DrawTextureEx(world.sprites["background"], {0, 0}, 0, f32(SPRITE_SCALE), rl.WHITE)
 
-        for obstacle in world.obstacles {
-            texture := world.sprites["obstacle"]
+		for obstacle in world.obstacles {
+			texture := world.sprites["obstacle"]
 
 			rl.DrawTextureEx(
 				texture,
-                {obstacle.lower.x, obstacle.lower.y},
-                0,
-                f32(SPRITE_SCALE),
-                rl.WHITE,
+				{obstacle.lower.x, obstacle.lower.y},
+				0,
+				f32(SPRITE_SCALE),
+				rl.WHITE,
 			)
 
-            rl.DrawTexturePro(
-                texture,
-                {0, 0, f32(texture.width), -f32(texture.height)},
-                {
-                    obstacle.upper.x,
-                    obstacle.upper.y + obstacle.upper.height - f32(OBSTACLE_HEIGHT),
-                    f32(OBSTACLE_WIDTH),
-                    f32(OBSTACLE_HEIGHT),
-                },
-                {0, 0},
-                0,
-                rl.WHITE,
-            )
-        }
+			rl.DrawTexturePro(
+				texture,
+				{0, 0, f32(texture.width), -f32(texture.height)},
+				{
+					obstacle.upper.x,
+					obstacle.upper.y + obstacle.upper.height - f32(OBSTACLE_HEIGHT),
+					f32(OBSTACLE_WIDTH),
+					f32(OBSTACLE_HEIGHT),
+				},
+				{0, 0},
+				0,
+				rl.WHITE,
+			)
+		}
 
-		{// Draw base
+		{ 	// Draw base
 			base := world.sprites["base"]
 			w := f32(base.width) * f32(SPRITE_SCALE)
-            off := math.mod_f32(world.scroll_x, w)
+			off := math.mod_f32(world.scroll_x, w)
 			rl.DrawTextureEx(base, {-off, f32(FLOOR_HEIGHT)}, 0, f32(SPRITE_SCALE), rl.WHITE)
 			rl.DrawTextureEx(base, {w - off, f32(FLOOR_HEIGHT)}, 0, f32(SPRITE_SCALE), rl.WHITE)
 		}
 
-        rl.DrawRectangle(
-            i32(world.player_x),
-            i32(world.player_y),
-            PLAYER_WIDTH,
-            PLAYER_HEIGHT,
-            rl.WHITE,
-        )
-		rl.DrawTexturePro(
-			world.sprites["bird"],
-			{0, 0, f32(world.sprites["bird"].width), f32(world.sprites["bird"].height)},
-			{world.player_x, world.player_y, PLAYER_WIDTH, PLAYER_WIDTH},
-			{0, 0},
-			0,
-			rl.WHITE,
-		)
 
 		switch world.game_state {
 		case .Init:
@@ -252,14 +254,36 @@ main :: proc() {
 
 			rl.DrawText(text, WINDOW_WIDTH / 2 - text_size / 2, 40, 24, rl.WHITE)
 		case .Playing:
-			// draw score
-			{
-				first_number := world.sprites[fmt.tprint(world.score % 10)]
-				second_number := world.sprites[fmt.tprint(math.floor_div(world.score, 10))]
+            draw_score(&world)
 
-				rl.DrawTexture(second_number, WINDOW_WIDTH / 2 - first_number.width, 40, rl.WHITE)
-				rl.DrawTexture(first_number, WINDOW_WIDTH / 2, 40, rl.WHITE)
-			}
+            { // Draw bird
+                rl.DrawRectangle(
+                    i32(world.player_x),
+                    i32(world.player_y),
+                    PLAYER_WIDTH,
+                    PLAYER_HEIGHT,
+                    rl.WHITE,
+                )
+                rl.DrawTexturePro(
+                    world.sprites["bird"],
+                    {0, 0, f32(world.sprites["bird"].width), f32(world.sprites["bird"].height)},
+                    {world.player_x, world.player_y, PLAYER_WIDTH, PLAYER_WIDTH},
+                    {0, 0},
+                    0,
+                    rl.WHITE,
+                )
+            }
+		case .GameOver:
+            draw_score(&world)
+            gameover := world.sprites["gameover"]
+
+			rl.DrawTextureEx(
+                gameover,
+				{f32((WINDOW_WIDTH / 2) - (gameover.width)), f32(WINDOW_HEIGHT / 3)},
+                0,
+				SPRITE_SCALE,
+				rl.WHITE,
+			)
 		}
 	}
 
@@ -270,5 +294,5 @@ main :: proc() {
 		rl.UnloadSound(sounds[key])
 	}
 	rl.CloseAudioDevice()
-	rl.CloseWindow()
+    rl.CloseWindow()
 }
