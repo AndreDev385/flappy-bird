@@ -1,8 +1,12 @@
 package mai
 
+import "core:sort"
+import "core:os"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
+import "core:strconv"
+import "core:strings"
 import rl "vendor:raylib"
 
 GameState :: enum {
@@ -25,6 +29,7 @@ World :: struct {
 	game_state:             GameState,
 	obstacles:              [dynamic]Obstacle,
 	score:                  int,
+	high_scores:            [dynamic]int,
 	player_size:            int,
 	player_y:               f32,
 	player_x:               f32,
@@ -46,7 +51,7 @@ PLAYER_WIDTH :: 34 * SPRITE_SCALE
 PLAYER_HEIGHT :: 24 * SPRITE_SCALE
 STARTING_PLAYER_Y := f32(WINDOW_HEIGHT / 2 - PLAYER_HEIGHT / 2)
 
-FLAP_VELOCITY :: 4.5 * SPRITE_SCALE
+FLAP_VELOCITY :: 5 * SPRITE_SCALE
 
 GRAVITY :: 0.25 * SPRITE_SCALE
 
@@ -56,6 +61,9 @@ OBSTACLE_SPEED :: 2 * SPRITE_SCALE
 GAP_SIZE :: 100 * SPRITE_SCALE
 
 SPAWN_TIMER :: 2.5 // seconds
+
+HIGH_SCORE_FILE :: "high_scores.txt"
+HIGH_SCORES_MAX :: 5
 
 spawn_obstacle :: proc() -> Obstacle {
 	initial_x: f32 = WINDOW_WIDTH + OBSTACLE_WIDTH
@@ -81,6 +89,76 @@ restart :: proc(world: ^World) {
 	clear(&world.obstacles)
 }
 
+high_scores_sort_desc :: proc(hs: ^[dynamic]int) {
+	sort.quick_sort_proc(hs[:], proc(a, b: int) -> int {
+		return sort.compare_ints(b, a)
+	})
+}
+
+high_scores_submit :: proc(hs: ^[dynamic]int, score: int) -> bool {
+	if len(hs) >= HIGH_SCORES_MAX && score <= hs[HIGH_SCORES_MAX - 1] {
+		return false
+	}
+
+	append(hs, score)
+	high_scores_sort_desc(hs)
+	if len(hs) > HIGH_SCORES_MAX {
+		resize(hs, HIGH_SCORES_MAX) // drop the one that fell off the list
+	}
+	return true
+}
+
+high_scores_load :: proc(path: string) -> [dynamic]int {
+	scores := make([dynamic]int, 0, HIGH_SCORES_MAX)
+
+	data, err := os.read_entire_file(path, context.allocator)
+	if err != nil {
+		return scores // missing or unreadable: start with no scores
+	}
+	defer delete(data)
+
+	lines := strings.split_lines(string(data))
+	defer delete(lines)
+
+	for raw_line in lines {
+		line := strings.trim_space(raw_line)
+		score, ok := strconv.parse_int(line, 10)
+		if ok {
+			append(&scores, score)
+		}
+	}
+
+	high_scores_sort_desc(&scores)
+	if len(scores) > HIGH_SCORES_MAX {
+		resize(&scores, HIGH_SCORES_MAX)
+	}
+	return scores
+}
+
+high_scores_save :: proc(hs: []int, path: string) {
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+
+	for score in hs {
+		fmt.sbprintf(&b, "%d\n", score)
+	}
+
+	if err := os.write_entire_file(path, strings.to_string(b)); err != nil {
+		fmt.eprintf("could not save %s: %v\n", path, err)
+	}
+}
+
+enter_game_over :: proc(world: ^World) {
+	if world.game_state == .GameOver {
+		return
+	}
+	world.game_state = .GameOver
+
+	if high_scores_submit(&world.high_scores, world.score) {
+		high_scores_save(world.high_scores[:], HIGH_SCORE_FILE)
+	}
+}
+
 draw_score :: proc(world: ^World) {
 	score := world.score
 
@@ -102,6 +180,32 @@ draw_score :: proc(world: ^World) {
 		digit := world.sprites[fmt.tprint((score / d) % 10)]
 		rl.DrawTexture(digit, x, 40, rl.WHITE)
 		x += digit.width
+	}
+}
+
+draw_high_scores :: proc(world: ^World) {
+	title: cstring = "TOP 5"
+	title_size: i32 = 30
+	rl.DrawText(
+		title,
+		WINDOW_WIDTH / 2 - rl.MeasureText(title, title_size) / 2,
+		460,
+		title_size,
+		rl.YELLOW,
+	)
+
+	entry_size: i32 = 28
+	y: i32 = 510
+	for score, i in world.high_scores {
+		text := fmt.ctprintf("%d. %d", i + 1, score)
+		rl.DrawText(
+			text,
+			WINDOW_WIDTH / 2 - rl.MeasureText(text, entry_size) / 2,
+			y,
+			entry_size,
+			rl.WHITE,
+		)
+		y += 42
 	}
 }
 
@@ -163,8 +267,12 @@ main :: proc() {
 		scroll_x               = 0,
 	}
 
+	world.high_scores = high_scores_load(HIGH_SCORE_FILE)
+
 	rl.SetTargetFPS(60)
 	for !rl.WindowShouldClose() {
+
+		defer free_all(context.temp_allocator)
 
 		world.scroll_x += OBSTACLE_SPEED
 
@@ -227,12 +335,13 @@ main :: proc() {
 
 				if upper_collision || lower_collision {
 					rl.PlaySound(world.sounds["hit"])
-					world.game_state = .GameOver
+					enter_game_over(&world)
+					break
 				}
 			}
 			if world.player_y + f32(PLAYER_HEIGHT) >= FLOOR_HEIGHT {
 				rl.PlaySound(world.sounds["hit"])
-				world.game_state = .GameOver
+				enter_game_over(&world)
 			}
 		case .GameOver:
 			world.player_vy += GRAVITY
@@ -314,6 +423,8 @@ main :: proc() {
 				SPRITE_SCALE,
 				rl.WHITE,
 			)
+
+			draw_high_scores(&world)
 		}
 	}
 
@@ -323,6 +434,7 @@ main :: proc() {
 	for key in sounds {
 		rl.UnloadSound(sounds[key])
 	}
+	delete(world.high_scores)
 	rl.CloseAudioDevice()
 	rl.CloseWindow()
 }
