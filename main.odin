@@ -28,6 +28,8 @@ Sounds :: map[string]rl.Sound
 World :: struct {
 	game_state:             GameState,
 	obstacles:              [dynamic]Obstacle,
+	obstacle_speed:         f32,
+	obstacle_gap:           f32,
 	score:                  int,
 	high_scores:            [dynamic]int,
 	player_size:            int,
@@ -44,6 +46,8 @@ World :: struct {
 	anim_frame:             int,
 	flash_alpha:            f32,
 	shake_time:             f32,
+	difficulty:             f32,
+	landed:                 bool,
 }
 
 SPRITE_SCALE :: 2
@@ -62,37 +66,50 @@ GRAVITY :: 0.25 * SPRITE_SCALE
 
 OBSTACLE_WIDTH :: 52 * SPRITE_SCALE
 OBSTACLE_HEIGHT :: 320 * SPRITE_SCALE
-OBSTACLE_SPEED :: 2 * SPRITE_SCALE
-GAP_SIZE :: 100 * SPRITE_SCALE
+OBSTACLE_BASE_SPEED :: 2 * SPRITE_SCALE
 
-SPAWN_TIMER :: 2.5 // seconds
+MAX_GAP_SIZE :: 110 * SPRITE_SCALE
+MIN_GAP_SIZE :: 80 * SPRITE_SCALE
+
+SPAWN_TIMER :: 2.5 // seconds between pipes at base speed (shrinks as speed grows)
 
 HIGH_SCORE_FILE :: "high_scores.txt"
 HIGH_SCORES_MAX :: 5
 
-spawn_obstacle :: proc() -> Obstacle {
+spawn_obstacle :: proc(world: ^World) {
 	initial_x: f32 = WINDOW_WIDTH + OBSTACLE_WIDTH
 
 	min_height: f32 = 60 * SPRITE_SCALE
-	max_height: f32 = FLOOR_HEIGHT - GAP_SIZE - 60 * SPRITE_SCALE
+	max_height: f32 = FLOOR_HEIGHT - world.obstacle_gap - 60 * SPRITE_SCALE
 
 	gap_y := rand.float32_range(min_height, max_height)
 
-	return Obstacle {
-		upper = rl.Rectangle{initial_x, 0, OBSTACLE_WIDTH, gap_y},
-		lower = rl.Rectangle{initial_x, gap_y + GAP_SIZE, OBSTACLE_WIDTH, WINDOW_HEIGHT},
-		scored = false,
-	}
+	append(
+		&world.obstacles,
+		(Obstacle {
+				upper = rl.Rectangle{initial_x, 0, OBSTACLE_WIDTH, gap_y},
+				lower = rl.Rectangle {
+					initial_x,
+					gap_y + world.obstacle_gap,
+					OBSTACLE_WIDTH,
+					WINDOW_HEIGHT,
+				},
+				scored = false,
+			}),
+	)
 }
 
 restart :: proc(world: ^World) {
 	world.score = 0
 	world.player_y = STARTING_PLAYER_Y
+	world.player_vy = 0
+	world.player_rotation = 0
+	world.landed = false
 	world.game_state = .Init
-	world.max_obstacle_timer = SPAWN_TIMER
 	world.current_obstacle_timer = -1
-	world.flash_alpha = 1.0
 	clear(&world.obstacles)
+
+	rl.PlaySound(world.sounds["swoosh"])
 }
 
 high_scores_sort_desc :: proc(hs: ^[dynamic]int) {
@@ -165,7 +182,8 @@ enter_game_over :: proc(world: ^World) {
 	}
 
 	rl.PlaySound(world.sounds["hit"])
-    world.shake_time = 0.25
+	world.shake_time = 0.25
+	world.flash_alpha = 1.0
 }
 
 draw_score :: proc(world: ^World) {
@@ -268,6 +286,8 @@ main :: proc() {
 	world := World {
 		game_state             = GameState.Init,
 		obstacles              = obstacles,
+		obstacle_speed         = OBSTACLE_BASE_SPEED,
+		obstacle_gap           = MAX_GAP_SIZE,
 		player_y               = STARTING_PLAYER_Y,
 		player_x               = f32(WINDOW_WIDTH / 2 - PLAYER_WIDTH / 2),
 		player_vy              = 0,
@@ -278,18 +298,28 @@ main :: proc() {
 		scroll_x               = 0,
 		anim_timer             = 0,
 		anim_frame             = 0,
-		flash_alpha            = 0.1,
-        shake_time = 0,
+		flash_alpha            = 0,
+		shake_time             = 0,
+		landed                 = false,
 	}
 
 	world.high_scores = high_scores_load(HIGH_SCORE_FILE)
 
 	rl.SetTargetFPS(60)
 	for !rl.WindowShouldClose() {
+		world.difficulty = math.min(f32(world.score) / 30.0, 1.0)
+		extra_speed: f32 = 2.0
+		world.obstacle_speed = OBSTACLE_BASE_SPEED + world.difficulty * extra_speed
+
+		world.obstacle_gap = MAX_GAP_SIZE - world.difficulty * (MAX_GAP_SIZE - MIN_GAP_SIZE)
+
+		// Keep the distance between pipes constant: as speed grows, shrink the
+		// spawn interval instead of letting the spacing inflate with difficulty.
+		world.max_obstacle_timer = SPAWN_TIMER * OBSTACLE_BASE_SPEED / world.obstacle_speed
 
 		defer free_all(context.temp_allocator)
 
-		world.scroll_x += OBSTACLE_SPEED
+		world.scroll_x += world.obstacle_speed
 
 		// UPDATE
 		switch world.game_state {
@@ -297,6 +327,7 @@ main :: proc() {
 			if rl.IsKeyPressed(rl.KeyboardKey.SPACE) {
 				world.game_state = .Playing
 				world.player_vy = -FLAP_VELOCITY
+				rl.PlaySound(world.sounds["swoosh"])
 			}
 		case .Playing:
 			if rl.IsKeyPressed(rl.KeyboardKey.SPACE) {
@@ -316,9 +347,8 @@ main :: proc() {
 				world.anim_timer += dt
 				max_time: f32 = 0.1
 				if world.anim_timer >= max_time {
-					world.anim_frame += 1
-					world.anim_timer = 0
-					if world.anim_frame > 2 do world.anim_frame = 0
+					world.anim_frame = (world.anim_frame + 1) % 4
+					world.anim_timer -= max_time
 				}
 			}
 
@@ -331,13 +361,13 @@ main :: proc() {
 			world.current_obstacle_timer -= rl.GetFrameTime()
 			if world.current_obstacle_timer < 0 {
 				world.current_obstacle_timer = world.max_obstacle_timer
-				append(&world.obstacles, spawn_obstacle())
+				spawn_obstacle(&world)
 			}
 
 			// Move obstacles & point score
 			for &obstacle in world.obstacles {
-				obstacle.upper.x -= OBSTACLE_SPEED
-				obstacle.lower.x -= OBSTACLE_SPEED
+				obstacle.upper.x -= world.obstacle_speed
+				obstacle.lower.x -= world.obstacle_speed
 
 				if world.player_x > obstacle.upper.x + obstacle.upper.width / 2 &&
 				   !obstacle.scored {
@@ -378,17 +408,23 @@ main :: proc() {
 			}
 
 			world.flash_alpha *= 0.9
-            world.shake_time -= rl.GetFrameTime()
+			world.shake_time -= rl.GetFrameTime()
 
 			world.player_vy += GRAVITY
-			if world.player_y < FLOOR_HEIGHT - PLAYER_HEIGHT / 2 {
+			if world.player_y < FLOOR_HEIGHT - PLAYER_HEIGHT {
 				world.player_y += world.player_vy
-			} else {
-				world.player_vy = 10
+			} else if !world.landed {
+				world.landed = true
+				world.player_y = FLOOR_HEIGHT - PLAYER_HEIGHT
+				world.player_vy = 0
+				rl.PlaySound(world.sounds["die"])
 			}
 
 			{ 	// player rotation
-				target := clamp(world.player_vy * 3, -25.0, 90)
+				target := clamp(world.player_vy * 3, -25.0, 90.0)
+				if world.landed {
+					target = 90
+				}
 				world.player_rotation += (target - world.player_rotation) * 0.15
 			}
 		}
@@ -397,13 +433,19 @@ main :: proc() {
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
 
-		offset: rl.Vector2
+		// Screen shake: slide the scene around, and zoom in slightly while
+		// shaking so the window edges never show through.
+		camera := rl.Camera2D{{0, 0}, {0, 0}, 0, 1}
 		if world.shake_time > 0 {
-			offset = {rand.float32_range(-6, 6), rand.float32_range(-6, 6)}
-		} else {
-			offset = {0, 0}
+			amp := clamp(world.shake_time * 24, 0.0, 6.0) // 6px → 0 as it decays
+			camera.offset = {
+				WINDOW_WIDTH / 2 + rand.float32_range(-amp, amp),
+				WINDOW_HEIGHT / 2 + rand.float32_range(-amp, amp),
+			}
+			camera.target = {WINDOW_WIDTH / 2, WINDOW_HEIGHT / 2}
+			camera.zoom = 1.05
 		}
-		rl.BeginMode2D(rl.Camera2D{offset, {0, 0}, 0, 1.0})
+		rl.BeginMode2D(camera)
 
 		rl.DrawTextureEx(world.sprites["background"], {0, 0}, 0, f32(SPRITE_SCALE), rl.WHITE)
 
@@ -452,10 +494,11 @@ main :: proc() {
 			draw_base(&world, true)
 			draw_score(&world)
 
-			bird_sprites: [3]rl.Texture2D = {
+			bird_sprites: [4]rl.Texture2D = {
+				world.sprites["bird_up"],
+				world.sprites["bird_mid"],
 				world.sprites["bird_down"],
 				world.sprites["bird_mid"],
-				world.sprites["bird_up"],
 			}
 
 			rl.DrawTexturePro(
@@ -510,7 +553,12 @@ main :: proc() {
 			)
 
 			draw_high_scores(&world)
+		}
 
+		rl.EndMode2D()
+
+		// White flash on death (drawn unshaken so it always covers the window)
+		if world.game_state == .GameOver {
 			rl.DrawRectangle(
 				0,
 				0,
@@ -520,7 +568,6 @@ main :: proc() {
 			)
 		}
 
-        rl.EndMode2D()
 		rl.EndDrawing()
 	}
 
