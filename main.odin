@@ -1,10 +1,10 @@
 package mai
 
-import "core:sort"
-import "core:os"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
+import "core:os"
+import "core:sort"
 import "core:strconv"
 import "core:strings"
 import rl "vendor:raylib"
@@ -34,11 +34,16 @@ World :: struct {
 	player_y:               f32,
 	player_x:               f32,
 	player_vy:              f32,
+	player_rotation:        f32,
 	max_obstacle_timer:     f32,
 	current_obstacle_timer: f32,
 	sprites:                Sprites,
 	sounds:                 Sounds,
 	scroll_x:               f32,
+	anim_timer:             f32,
+	anim_frame:             int,
+	flash_alpha:            f32,
+	shake_time:             f32,
 }
 
 SPRITE_SCALE :: 2
@@ -86,6 +91,7 @@ restart :: proc(world: ^World) {
 	world.game_state = .Init
 	world.max_obstacle_timer = SPAWN_TIMER
 	world.current_obstacle_timer = -1
+	world.flash_alpha = 1.0
 	clear(&world.obstacles)
 }
 
@@ -157,6 +163,9 @@ enter_game_over :: proc(world: ^World) {
 	if high_scores_submit(&world.high_scores, world.score) {
 		high_scores_save(world.high_scores[:], HIGH_SCORE_FILE)
 	}
+
+	rl.PlaySound(world.sounds["hit"])
+    world.shake_time = 0.25
 }
 
 draw_score :: proc(world: ^World) {
@@ -209,13 +218,13 @@ draw_high_scores :: proc(world: ^World) {
 	}
 }
 
-draw_base :: proc(world: ^World, moving:= false) {
+draw_base :: proc(world: ^World, moving := false) {
 	base := world.sprites["base"]
 
-    if !moving {
-	    rl.DrawTextureEx(base, {0, f32(FLOOR_HEIGHT)}, 0, f32(SPRITE_SCALE), rl.WHITE)
-        return
-    }
+	if !moving {
+		rl.DrawTextureEx(base, {0, f32(FLOOR_HEIGHT)}, 0, f32(SPRITE_SCALE), rl.WHITE)
+		return
+	}
 
 	w := f32(base.width) * f32(SPRITE_SCALE)
 	off := math.mod_f32(world.scroll_x, w)
@@ -248,7 +257,9 @@ main :: proc() {
 	sprites["9"] = rl.LoadTexture("sprites/9.png")
 	sprites["background"] = rl.LoadTexture("sprites/background-day.png")
 	sprites["base"] = rl.LoadTexture("sprites/base.png")
-	sprites["bird"] = rl.LoadTexture("sprites/redbird-midflap.png")
+	sprites["bird_down"] = rl.LoadTexture("sprites/redbird-downflap.png")
+	sprites["bird_mid"] = rl.LoadTexture("sprites/redbird-midflap.png")
+	sprites["bird_up"] = rl.LoadTexture("sprites/redbird-upflap.png")
 	sprites["obstacle"] = rl.LoadTexture("sprites/pipe-green.png")
 	sprites["gameover"] = rl.LoadTexture("sprites/gameover.png")
 	sprites["start_message"] = rl.LoadTexture("sprites/message.png")
@@ -265,6 +276,10 @@ main :: proc() {
 		sprites                = sprites,
 		sounds                 = sounds,
 		scroll_x               = 0,
+		anim_timer             = 0,
+		anim_frame             = 0,
+		flash_alpha            = 0.1,
+        shake_time = 0,
 	}
 
 	world.high_scores = high_scores_load(HIGH_SCORE_FILE)
@@ -294,6 +309,22 @@ main :: proc() {
 			if world.player_y < 0 {
 				world.player_y = 0
 				world.player_vy = 0
+			}
+
+			{ 	// animate bird
+				dt := rl.GetFrameTime()
+				world.anim_timer += dt
+				max_time: f32 = 0.1
+				if world.anim_timer >= max_time {
+					world.anim_frame += 1
+					world.anim_timer = 0
+					if world.anim_frame > 2 do world.anim_frame = 0
+				}
+			}
+
+			{ 	// player rotation
+				target := clamp(world.player_vy * 3, -40.0, 90)
+				world.player_rotation += (target - world.player_rotation) * 0.15
 			}
 
 			// Spawn obstacles timer
@@ -334,27 +365,45 @@ main :: proc() {
 				)
 
 				if upper_collision || lower_collision {
-					rl.PlaySound(world.sounds["hit"])
 					enter_game_over(&world)
 					break
 				}
 			}
 			if world.player_y + f32(PLAYER_HEIGHT) >= FLOOR_HEIGHT {
-				rl.PlaySound(world.sounds["hit"])
 				enter_game_over(&world)
 			}
 		case .GameOver:
-			world.player_vy += GRAVITY
-			if world.player_y < FLOOR_HEIGHT do world.player_y += world.player_vy
 			if rl.IsKeyPressed(rl.KeyboardKey.SPACE) {
 				restart(&world)
+			}
+
+			world.flash_alpha *= 0.9
+            world.shake_time -= rl.GetFrameTime()
+
+			world.player_vy += GRAVITY
+			if world.player_y < FLOOR_HEIGHT - PLAYER_HEIGHT / 2 {
+				world.player_y += world.player_vy
+			} else {
+				world.player_vy = 10
+			}
+
+			{ 	// player rotation
+				target := clamp(world.player_vy * 3, -25.0, 90)
+				world.player_rotation += (target - world.player_rotation) * 0.15
 			}
 		}
 
 		// ======== Draw section
 		rl.BeginDrawing()
-		defer rl.EndDrawing()
 		rl.ClearBackground(rl.BLACK)
+
+		offset: rl.Vector2
+		if world.shake_time > 0 {
+			offset = {rand.float32_range(-6, 6), rand.float32_range(-6, 6)}
+		} else {
+			offset = {0, 0}
+		}
+		rl.BeginMode2D(rl.Camera2D{offset, {0, 0}, 0, 1.0})
 
 		rl.DrawTextureEx(world.sprites["background"], {0, 0}, 0, f32(SPRITE_SCALE), rl.WHITE)
 
@@ -386,7 +435,7 @@ main :: proc() {
 
 		switch world.game_state {
 		case .Init:
-            draw_base(&world, false)
+			draw_base(&world, false)
 
 			start_message := world.sprites["start_message"]
 			rl.DrawTextureEx(
@@ -400,20 +449,56 @@ main :: proc() {
 				rl.WHITE,
 			)
 		case .Playing:
-            draw_base(&world, true)
+			draw_base(&world, true)
 			draw_score(&world)
 
+			bird_sprites: [3]rl.Texture2D = {
+				world.sprites["bird_down"],
+				world.sprites["bird_mid"],
+				world.sprites["bird_up"],
+			}
+
 			rl.DrawTexturePro(
-				world.sprites["bird"],
-				{0, 0, f32(world.sprites["bird"].width), f32(world.sprites["bird"].height)},
-				{world.player_x, world.player_y, PLAYER_WIDTH, PLAYER_HEIGHT},
-				{0, 0},
-				0,
+				bird_sprites[world.anim_frame],
+				{
+					0,
+					0,
+					f32(bird_sprites[world.anim_frame].width),
+					f32(bird_sprites[world.anim_frame].height),
+				},
+				{
+					world.player_x + PLAYER_WIDTH / 2,
+					world.player_y + PLAYER_HEIGHT / 2,
+					PLAYER_WIDTH,
+					PLAYER_HEIGHT,
+				},
+				{PLAYER_WIDTH / 2, PLAYER_HEIGHT / 2},
+				world.player_rotation,
 				rl.WHITE,
 			)
 		case .GameOver:
-            draw_base(&world, false)
+			draw_base(&world, false)
 			draw_score(&world)
+
+			rl.DrawTexturePro(
+				world.sprites["bird_down"],
+				{
+					0,
+					0,
+					f32(world.sprites["bird_down"].width),
+					f32(world.sprites["bird_down"].height),
+				},
+				{
+					world.player_x + PLAYER_WIDTH / 2,
+					world.player_y + PLAYER_HEIGHT / 2,
+					PLAYER_WIDTH,
+					PLAYER_HEIGHT,
+				},
+				{PLAYER_WIDTH / 2, PLAYER_HEIGHT / 2},
+				world.player_rotation,
+				rl.WHITE,
+			)
+
 			gameover := world.sprites["gameover"]
 
 			rl.DrawTextureEx(
@@ -425,7 +510,18 @@ main :: proc() {
 			)
 
 			draw_high_scores(&world)
+
+			rl.DrawRectangle(
+				0,
+				0,
+				WINDOW_WIDTH,
+				WINDOW_HEIGHT,
+				rl.Color{255, 255, 255, u8(255 * world.flash_alpha)},
+			)
 		}
+
+        rl.EndMode2D()
+		rl.EndDrawing()
 	}
 
 	for key in sprites {
