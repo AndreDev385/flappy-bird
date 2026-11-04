@@ -1,0 +1,7 @@
+# Compiled binaries
+flappy-bird
+flappy-bird.bin
+*.exe
+
+# Runtime data
+high_scores.txt
