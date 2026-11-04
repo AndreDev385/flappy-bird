@@ -71,5 +71,8 @@ paused as a practice project.
 
 ## Credits and assets
 
-The sprites and sounds in `sprites/` and `audio/` are third-party assets. Check
-their license before reusing them outside this repository.
+The sprites in `sprites/` and the sounds in `audio/` are MIT licensed.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
